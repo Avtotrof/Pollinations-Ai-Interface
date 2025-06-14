@@ -10,6 +10,7 @@ import random
 from PIL import Image, ImageTk
 import base64  # added for encoding images
 import urllib.parse  # added for URL encoding
+import pollinations
 
 BASE_URL = "https://text.pollinations.ai"
 
@@ -89,27 +90,31 @@ class SearchGPTAdapter:
 
     def handle_image_message(self, message):
         try:
-            url = f"{BASE_URL}/openai"
+            url = f"{BASE_URL}/openai-reasoning"  # Changed endpoint
             payload = {
-                "model": "openai",
+                "model": "openai-reasoning",  # Use consistent model
                 "messages": [{
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": message.get("content", "What's in this image?")},
+                        {
+                            "type": "text",
+                            "text": message.get("content", "What's in this image?")
+                        },
                         {
                             "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{message['image']}"
-                            }
+                            "url": f"data:image/jpeg;base64,{message['image']}"  # Fixed image URL format
                         }
                     ]
-                }],
-                "max_tokens": 500
+                }]
             }
 
             response = requests.post(url, headers=self.headers, json=payload)
             response.raise_for_status()
             result = response.json()
+            
+            if 'error' in result:
+                raise Exception(result['error'])
+                
             return MODEL, result['choices'][0]['message']['content']
         except Exception as e:
             self.logger.error(f"Error processing image: {e}")
@@ -213,44 +218,31 @@ def send_message():
 # ----------------------------
 # IMAGE GENERATION FUNCTIONS
 # ----------------------------
-def generate_image_url(prompt, width=1024, height=1024, seed=None, model='flux'):
+def generate_image(prompt, model='flux', width=1024, height=1024, seed=None):
     if seed is None:
         seed = random.randint(0, 1000000)
-        print(f"Using random seed: {seed}")
-    return f"https://pollinations.ai/p/{prompt}?width={width}&height={height}&seed={seed}&model={model}"
-
-def preview_image(image_url):
+    
     try:
-        response = requests.get(image_url, stream=True, timeout=60)
-        response.raise_for_status()
-        image_data = BytesIO(response.content)
-        pil_image = Image.open(image_data)
-        return pil_image
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed to load image preview: {e}")
-        return None
-
-def download_image_file(image_url, default_filename):
-    try:
-        response = requests.get(image_url, stream=True, timeout=60)
-        response.raise_for_status()
-        file_path = filedialog.asksaveasfilename(
-            initialfile=default_filename,
-            defaultextension=".jpg",
-            filetypes=[("JPEG Image", "*.jpg"), ("All Files", "*.*")]
+        model_instance = pollinations.Image(
+            model=model,
+            width=width,
+            height=height,
+            seed=seed
         )
-        if file_path:
-            with open(file_path, 'wb') as file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    file.write(chunk)
-            messagebox.showinfo("Download Completed", f"Image saved to: {file_path}")
+        
+        result = model_instance.Generate(
+            prompt=prompt,
+            save=False
+        )
+        return result
     except Exception as e:
-        messagebox.showerror("Download Failed", f"Failed to download image: {e}")
+        logging.error(f"Error generating image: {e}")
+        return None
 
 def open_image_generation():
     image_win = tk.Toplevel(root)
     image_win.title("Image Generator")
-    image_win.grab_set()  # Modal window
+    image_win.grab_set()
     img_default_font = ("Helvetica", 12)
 
     input_frame = tk.Frame(image_win)
@@ -260,9 +252,10 @@ def open_image_generation():
     prompt_entry = tk.Entry(input_frame, width=50, font=img_default_font)
     prompt_entry.grid(row=0, column=1, padx=5, pady=5)
     
+    # Update model selection with correct options
     tk.Label(input_frame, text="Select model:", font=img_default_font).grid(row=1, column=0, sticky="w")
     model_var = tk.StringVar(value="flux")
-    model_menu_img = tk.OptionMenu(input_frame, model_var, model_var.get())
+    model_menu_img = tk.OptionMenu(input_frame, model_var, "flux", "turbo", "gptimage")
     model_menu_img.config(font=img_default_font)
     model_menu_img.grid(row=1, column=1, padx=5, pady=5, sticky="w")
     
@@ -275,20 +268,36 @@ def open_image_generation():
         if not prompt:
             messagebox.showinfo("Input Error", "Please enter a prompt.")
             return
-        img_url = generate_image_url(prompt, model=model_var.get())
-        pil_img = preview_image(img_url)
-        if pil_img:
-            pil_img.thumbnail((400, 400))
-            photo = ImageTk.PhotoImage(pil_img)
+        
+        status_label.config(text="Generating image...")
+        image = generate_image(prompt, model=model_var.get())
+        
+        if image:
+            image.thumbnail((400, 400))
+            photo = ImageTk.PhotoImage(image)
             preview_label.config(image=photo)
             image_win.preview_photo = photo
-            image_win.current_image_url = img_url
+            image_win.current_image = image
             safe_prompt = prompt.replace(" ", "_")
             image_win.default_filename = f"{safe_prompt}_{model_var.get()}.jpg"
+            status_label.config(text="Idle")
+        else:
+            messagebox.showerror("Error", "Failed to generate image")
+            status_label.config(text="Idle")
 
     def do_download():
-        if hasattr(image_win, "current_image_url"):
-            download_image_file(image_win.current_image_url, image_win.default_filename)
+        if hasattr(image_win, "current_image"):
+            file_path = filedialog.asksaveasfilename(
+                initialfile=image_win.default_filename,
+                defaultextension=".jpg",
+                filetypes=[("JPEG Image", "*.jpg"), ("All Files", "*.*")]
+            )
+            if file_path:
+                try:
+                    image_win.current_image.save(file_path, "JPEG")
+                    messagebox.showinfo("Download Completed", f"Image saved to: {file_path}")
+                except Exception as e:
+                    messagebox.showerror("Download Failed", f"Failed to save image: {e}")
         else:
             messagebox.showinfo("No Preview", "Please preview an image before downloading.")
 
@@ -298,6 +307,8 @@ def open_image_generation():
     preview_btn.pack(side=tk.LEFT, padx=5)
     download_btn = tk.Button(btn_frame, text="Download Image", command=do_download, font=img_default_font)
     download_btn.pack(side=tk.LEFT, padx=5)
+    close_btn = tk.Button(btn_frame, text="Close", command=image_win.destroy, font=img_default_font)
+    close_btn.pack(side=tk.LEFT, padx=5)
 
 # Initialize main UI
 logging.basicConfig(level=logging.INFO)
